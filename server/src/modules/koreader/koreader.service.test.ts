@@ -647,6 +647,47 @@ describe('KoreaderService', () => {
       expect(result).toEqual({ shared: 0, stale: 1, held: 0 });
     });
 
+    it('keeps a stale entry from making this device look like the freshest source', async () => {
+      const previousUpdatedAt = new Date('2026-01-01T00:00:00.000Z');
+      mockRepo.getDeviceProgressForFiles.mockResolvedValue(
+        new Map([[10, [{ device: 'Kobo Libra 2', deviceId: 'device-a', percentage: 0.9, syncTimestamp: 1800000000, updatedAt: previousUpdatedAt }]]]),
+      );
+
+      const result = await service.applyBulkProgress(7, [{ bookFile: bookFile(10), percentage: 0.2, timestamp: 1700000000 }], device);
+
+      expect(result).toEqual({ shared: 0, stale: 1, held: 0 });
+      // getProgress picks its source by comparing this row's updatedAt with reading_progress,
+      // so a position the server already judged stale must not refresh it.
+      const upserted = mockRepo.upsertDeviceProgressMany.mock.calls[0]![0] as { updatedAt: Date }[];
+      expect(upserted[0]!.updatedAt).toBe(previousUpdatedAt);
+    });
+
+    it('keeps a held entry from refreshing the device row too', async () => {
+      const previousUpdatedAt = new Date('2026-01-01T00:00:00.000Z');
+      mockRepo.getProgressResetsForFiles.mockResolvedValue(new Map([[10, new Date('2026-02-02T12:00:00.000Z')]]));
+      mockRepo.getDeviceProgressForFiles.mockResolvedValue(
+        new Map([[10, [{ device: 'Kobo Libra 2', deviceId: 'device-a', percentage: 0.9, syncTimestamp: 1600000000, updatedAt: previousUpdatedAt }]]]),
+      );
+
+      const result = await service.applyBulkProgress(7, [{ bookFile: bookFile(10), percentage: 0.42 }], device);
+
+      expect(result).toEqual({ shared: 0, stale: 0, held: 1 });
+      const upserted = mockRepo.upsertDeviceProgressMany.mock.calls[0]![0] as { updatedAt: Date }[];
+      expect(upserted[0]!.updatedAt).toBe(previousUpdatedAt);
+    });
+
+    it('gives a fresh entry the batch timestamp', async () => {
+      const previousUpdatedAt = new Date('2026-01-01T00:00:00.000Z');
+      mockRepo.getDeviceProgressForFiles.mockResolvedValue(
+        new Map([[10, [{ device: 'Kobo Libra 2', deviceId: 'device-a', percentage: 0.1, syncTimestamp: 1600000000, updatedAt: previousUpdatedAt }]]]),
+      );
+
+      await service.applyBulkProgress(7, [{ bookFile: bookFile(10), percentage: 0.2, timestamp: 1700000000 }], device);
+
+      const upserted = mockRepo.upsertDeviceProgressMany.mock.calls[0]![0] as { updatedAt: Date }[];
+      expect(upserted[0]!.updatedAt.getTime()).toBeGreaterThan(previousUpdatedAt.getTime());
+    });
+
     it('treats the web reader position as newer known state', async () => {
       mockRepo.getReadingProgressUpdatedAtForFiles.mockResolvedValue(new Map([[10, new Date(1800000000 * 1000)]]));
 

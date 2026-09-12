@@ -177,6 +177,8 @@ function SweepHarness.install(opts)
     handle.scheduler = FakeScheduler.new()
     handle.sqlite = FakeSqlite.install(statisticsResponder(handle), opts.sqlite)
 
+    local file_signatures = opts.file_signatures or {}
+
     package.loaded["datastorage"] = { getSettingsDir = function() return "/nonexistent" end }
     package.loaded["luasettings"] = {
         open = function()
@@ -204,12 +206,15 @@ function SweepHarness.install(opts)
     }
     package.loaded["gettext"] = function(value) return value end
     package.loaded["util"] = {
-        partialMD5 = function(file) return "md5-" .. file end,
+        partialMD5 = function(file) return (opts.file_digests or {})[file] or ("md5-" .. file) end,
         trim = function(value) return value end,
     }
     package.loaded["libs/libkoreader-lfs"] = {
-        attributes = function(_, what)
+        attributes = function(path, what)
+            local signature = file_signatures[path]
             if what == "mode" then return "file" end
+            if what == "modification" then return (signature and signature.mtime) or 100 end
+            if what == "size" then return (signature and signature.size) or 1000 end
             return nil
         end,
     }

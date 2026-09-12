@@ -48,7 +48,7 @@ local BookOrbitProgressSync = require("bookorbit_progress_sync")
 local BookOrbitSweep = require("bookorbit_sweep")
 local BookOrbitUpdater = require("bookorbit_updater")
 
-local PLUGIN_VERSION = "1.5.2"
+local PLUGIN_VERSION = "1.5.3"
 
 local SYNC_STRATEGY = {
     PROMPT = 1,
@@ -515,6 +515,23 @@ end
 function BookOrbit:isOpenBookMatched(digest)
     if not digest then return false end
     return BookOrbitStateManager.getBook(digest) ~= nil
+end
+
+-- KOReader's cached partial_md5_checksum can outlive the file it was computed
+-- for, and the plugin reads it as the document identity. When the open book's
+-- real digest disagrees, every mapping that trusted the cache has to follow the
+-- content instead: the path, and the book that used to own it.
+function BookOrbit:onDocumentDigestCorrected(file, previous_digest, digest)
+    logger.warn("BookOrbit: corrected document identity for", file, previous_digest, digest)
+    pcall(function()
+        BookOrbitStateManager.mutateScoped({
+            digests = { previous_digest, digest },
+            files = { file },
+            global = false,
+        }, function(state)
+            state:remapFile(file, previous_digest, digest)
+        end)
+    end)
 end
 
 function BookOrbit:recordOpenAnnotationUnmatched(reason)

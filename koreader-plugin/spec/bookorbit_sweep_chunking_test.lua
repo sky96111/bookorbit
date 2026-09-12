@@ -111,9 +111,14 @@ do
     end
 
     local scanned, total = {}, 0
+    local file_digests = {}
+    for index = 1, 50 do
+        file_digests[string.format("/books/%02d.epub", index)] = string.format("digest%02d", index)
+    end
     local harness = SweepHarness.install{
         library_version = "v1",
         state = { books = books, global = { libraryVersion = "v1" } },
+        file_digests = file_digests,
         sidecar = {
             sidecarMtime = function(file)
                 scanned[file] = (scanned[file] or 0) + 1

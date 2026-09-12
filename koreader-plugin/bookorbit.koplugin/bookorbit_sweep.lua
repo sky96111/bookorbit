@@ -445,6 +445,7 @@ local function historyEntry(ctx, file)
 
     local file_exists = lfs.attributes(file, "mode") == "file"
     local md5 = ctx.state.files[file]
+    local verified_signature
     if not md5 and file_exists and DocSettings:hasSidecarFile(file) then
         local doc_settings = DocSettings:open(file)
         md5 = doc_settings:readSetting("partial_md5_checksum")
@@ -453,7 +454,15 @@ local function historyEntry(ctx, file)
             local ok, computed = pcall(util.partialMD5, file)
             ctx.timing.partial_md5_ms = ctx.timing.partial_md5_ms + elapsedMs(started)
             ctx.timing.partial_md5_count = ctx.timing.partial_md5_count + 1
-            if ok then md5 = computed end
+            if ok then
+                md5 = computed
+                -- Only a digest derived from the file itself vouches for its signature,
+                -- so the sidecar phase does not have to hash it again this run.
+                verified_signature = {
+                    mtime = lfs.attributes(file, "modification"),
+                    size = lfs.attributes(file, "size"),
+                }
+            end
         end
         ctx.state:rememberFile(file, md5)
     end
@@ -462,6 +471,7 @@ local function historyEntry(ctx, file)
     local cand = ctx.candidates[md5] or {}
     if file_exists then
         cand.file = file
+        cand.file_signature = verified_signature
         cand.source = "file"
         if cand.metadata_ambiguous then
             cand.title = titleFromHistoryItem(item)
@@ -630,6 +640,13 @@ local function stepMatchNext(ctx)
         -- a changed library version.
         ctx.state:setMatched(match.hash, match.bookFileId, match.bookId,
             cand and cand.file or nil, body.libraryVersion)
+        if cand and cand.file_signature then
+            local book = ctx.state:getBook(match.hash)
+            if book and book.file == cand.file then
+                book.fileMtime = cand.file_signature.mtime
+                book.fileSize = cand.file_signature.size
+            end
+        end
     end
     for _, md5 in ipairs(batch) do
         if not matched[md5] then
@@ -703,9 +720,41 @@ end
 -- Phase 4: read sidecars of matched books with known paths, mtime-gated, and
 -- queue annotation/state/progress deltas. Each book opens a sidecar file, so
 -- this runs in small chunks over a snapshot of the matched digests.
+
+-- The sidecar of a path is only this digest's data while the file at that path
+-- still hashes to it. KOReader caches partial_md5_checksum in the sidecar and
+-- never recomputes it, so a path that was replaced keeps the previous book's
+-- identity; reading it here would upload another book's position, highlights
+-- and state under this digest. The stored mtime and size make the check one
+-- stat per book, with a hash only when the file actually changed.
+local function verifySidecarIdentity(ctx, md5, book)
+    local file = book.file
+    if not file then return false end
+    local mtime = lfs.attributes(file, "modification")
+    if not mtime then return false end
+    local size = lfs.attributes(file, "size")
+    if book.fileMtime == mtime and book.fileSize == size then return true end
+
+    local started = nowMs()
+    local ok, digest = pcall(util.partialMD5, file)
+    ctx.timing.partial_md5_ms = ctx.timing.partial_md5_ms + elapsedMs(started)
+    ctx.timing.partial_md5_count = ctx.timing.partial_md5_count + 1
+    if not ok or not digest then return false end
+    if digest ~= md5 then
+        logger.warn("BookOrbit: sidecar identity mismatch, remapping", md5, digest, file)
+        ctx.state:remapFile(file, md5, digest)
+        return false
+    end
+
+    book.fileMtime = mtime
+    book.fileSize = size
+    return true
+end
+
 local function sidecarEntry(ctx, md5)
     local book = ctx.state:getBook(md5)
     if not book or not book.file then return end
+    if not verifySidecarIdentity(ctx, md5, book) then return end
 
     local mtime = BookOrbitSidecar.sidecarMtime(book.file)
     if not mtime then return end

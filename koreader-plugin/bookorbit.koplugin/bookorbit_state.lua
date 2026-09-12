@@ -95,10 +95,22 @@ function BookOrbitState:setMatched(md5, book_file_id, book_id, file, verified_ve
     local previous = self.books[md5]
     local identity_changed = previous ~= nil
         and (previous.fileId ~= book_file_id or previous.bookId ~= book_id)
-    local book = identity_changed and { file = file or previous.file } or (previous or {})
+    -- A path is only worth keeping while the file is still there. Sidecar reads
+    -- go through it, so a deleted path, or one another book now occupies, must
+    -- not stay bound to this digest.
+    local kept_file = file
+    if not kept_file and previous and previous.file
+            and lfs.attributes(previous.file, "mode") == "file" then
+        kept_file = previous.file
+    end
+    local book = identity_changed and {} or (previous or {})
     book.fileId = book_file_id
     book.bookId = book_id
-    book.file = file or book.file
+    book.file = kept_file
+    if not kept_file or (previous and previous.file ~= kept_file) then
+        book.fileMtime = nil
+        book.fileSize = nil
+    end
     book.statsWatermark = book.statsWatermark or 0
     book.annWatermark = book.annWatermark or ""
     book.annCount = book.annCount or 0
@@ -163,6 +175,27 @@ function BookOrbitState:rememberFile(file, md5)
         if book and not book.file then
             book.file = file
         end
+    end
+end
+
+-- Binds a path to the digest its content actually has. A file replaced at the
+-- same path keeps its previous sidecar, so the digest that used to own the path
+-- has to let go of it: one book's sidecar must never be read, or uploaded,
+-- under another book's digest.
+function BookOrbitState:remapFile(file, previous_digest, digest)
+    if not file or not digest then return end
+    if previous_digest and previous_digest ~= digest then
+        local stale = self.books[previous_digest]
+        if stale and stale.file == file then
+            stale.file = nil
+            stale.fileMtime = nil
+            stale.fileSize = nil
+        end
+    end
+    self.files[file] = digest
+    local book = self.books[digest]
+    if book and not book.file then
+        book.file = file
     end
 end
 

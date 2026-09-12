@@ -10,8 +10,13 @@ package.loaded["ffi/util"] = {
     fsyncOpenedFile = function() end,
     fsyncDirectory = function() end,
 }
+local missing_paths = { ["/books/gone.epub"] = true }
 package.loaded["libs/libkoreader-lfs"] = {
-    attributes = function() return nil end,
+    attributes = function(path, what)
+        if what ~= "mode" then return nil end
+        if missing_paths[path] then return nil end
+        return "file"
+    end,
 }
 package.loaded["luasettings"] = {
     open = function() error("this test must not touch the settings file") end,
@@ -117,6 +122,20 @@ assert(replaced_book.progressPushedPct == nil, "an identity change expires the p
 assert(replaced_book.ratingSyncedKnown == nil and replaced_book.reviewSyncedKnown == nil,
     "an identity change expires rating and review acknowledgments")
 assert(replaced_book.statusSyncedModified == nil, "an identity change expires the status acknowledgment")
+
+-- A path whose file is gone is worse than no path: the sweep reads sidecars
+-- through it, so it must not stay bound to this digest.
+local dangling = newState({ libraryVersion = "lib-v2" })
+dangling.books["gone"] = {
+    bookId = 1,
+    fileId = 11,
+    file = "/books/gone.epub",
+    statsWatermark = 900,
+}
+dangling:setMatched("gone", 22, 2, nil, "lib-v2")
+local dangling_book = dangling:getBook("gone")
+assert(dangling_book.fileId == 22 and dangling_book.bookId == 2, "a dangling path still stores the new server ids")
+assert(dangling_book.file == nil, "a path whose file is gone is not carried over")
 
 -- A server-side folder merge re-parents a file row to another book without
 -- changing its id, taking the old book's highlights, status, rating and review

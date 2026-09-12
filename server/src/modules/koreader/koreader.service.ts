@@ -302,14 +302,21 @@ export class KoreaderService {
     const appliedAt = new Date();
     const appliedAtSeconds = Math.floor(appliedAt.getTime() / 1000);
     const fileStates = new Map<number, { otherDevicesNewest: number; ownDeviceNewest: number; latestPercentage: number | null }>();
+    // Kept per file so a stale or held entry can leave the device row's recency untouched.
+    const ownDeviceUpdatedAt = new Map<number, Date>();
     for (const bookFileId of new Set(bookFileIds)) {
       const rows = deviceRows.get(bookFileId) ?? [];
       let otherDevicesNewest = 0;
       let ownDeviceNewest = 0;
       for (const row of rows) {
         const rowSeconds = row.syncTimestamp ?? Math.floor((row.updatedAt?.getTime() ?? 0) / 1000);
-        if (row.device === device.device && row.deviceId === device.deviceId) ownDeviceNewest = Math.max(ownDeviceNewest, rowSeconds);
-        else otherDevicesNewest = Math.max(otherDevicesNewest, rowSeconds);
+        if (row.device === device.device && row.deviceId === device.deviceId) {
+          ownDeviceNewest = Math.max(ownDeviceNewest, rowSeconds);
+          // Rows are newest first, so the first match is this device's latest write.
+          if (row.updatedAt && !ownDeviceUpdatedAt.has(bookFileId)) ownDeviceUpdatedAt.set(bookFileId, row.updatedAt);
+        } else {
+          otherDevicesNewest = Math.max(otherDevicesNewest, rowSeconds);
+        }
       }
       const readerSeconds = readerUpdatedAt.get(bookFileId);
       if (readerSeconds) otherDevicesNewest = Math.max(otherDevicesNewest, Math.floor(readerSeconds.getTime() / 1000));
@@ -328,25 +335,10 @@ export class KoreaderService {
       return { entry, stale, previousPercentage, heldByReset: false };
     });
 
-    const deviceUpserts = new Map<number, DeviceProgressUpsert>();
-    for (const { entry } of plans) {
-      deviceUpserts.set(entry.bookFile.id, {
-        bookFileId: entry.bookFile.id,
-        userId,
-        device: device.device,
-        deviceId: device.deviceId,
-        percentage: entry.percentage,
-        progress: entry.progress ?? null,
-        chapterIndex: this.chapterService.parseChapterIndexFromProgress(entry.progress ?? null),
-        syncTimestamp: entry.timestamp ?? null,
-      });
-    }
-    await this.repo.upsertDeviceProgressMany([...deviceUpserts.values()], appliedAt);
-    await this.repo.restoreDevice(userId, device.deviceId);
-
     // A sweep carries the device's whole shelf, so a book the user reset in BookOrbit shows up
     // here holding its pre-reset sidecar position. Same judgement as a single push, for the one
-    // device this sweep speaks for.
+    // device this sweep speaks for. Runs before the device write so a held entry can keep its
+    // row's recency as well.
     const convergedResetFileIds = new Set<number>();
     const retiredResetFileIds = new Set<number>();
     for (const plan of plans) {
@@ -363,6 +355,29 @@ export class KoreaderService {
     }
     for (const bookFileId of convergedResetFileIds) await this.repo.recordResetConvergence(bookFileId, userId, device.deviceId);
     for (const bookFileId of retiredResetFileIds) await this.repo.clearProgressReset(bookFileId, userId);
+
+    const deviceUpserts = new Map<number, DeviceProgressUpsert>();
+    for (const plan of plans) {
+      const { entry } = plan;
+      // A stale or held position is not the newest thing the user read. Writing it with
+      // updatedAt = now would make getProgress prefer it over a newer reading_progress row,
+      // so the row keeps the recency it already had (a first insert still gets appliedAt).
+      const preserveUpdatedAt = plan.stale || plan.heldByReset;
+      const previousUpdatedAt = ownDeviceUpdatedAt.get(entry.bookFile.id);
+      deviceUpserts.set(entry.bookFile.id, {
+        bookFileId: entry.bookFile.id,
+        userId,
+        device: device.device,
+        deviceId: device.deviceId,
+        percentage: entry.percentage,
+        progress: entry.progress ?? null,
+        chapterIndex: this.chapterService.parseChapterIndexFromProgress(entry.progress ?? null),
+        syncTimestamp: entry.timestamp ?? null,
+        updatedAt: preserveUpdatedAt && previousUpdatedAt ? previousUpdatedAt : appliedAt,
+      });
+    }
+    await this.repo.upsertDeviceProgressMany([...deviceUpserts.values()], appliedAt);
+    await this.repo.restoreDevice(userId, device.deviceId);
 
     const held = plans.filter((plan) => plan.heldByReset).length;
     if (held > 0) {

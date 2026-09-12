@@ -52,19 +52,42 @@ end
 
 -- Always the binary partial MD5: BookOrbit matches on the scanner-computed
 -- partial MD5 of the file, so the filename checksum method does not exist here.
+--
+-- KOReader computes partial_md5_checksum once and never revalidates it, so a
+-- file replaced at the same path keeps the previous book's identity and every
+-- push for it lands on the wrong book. The sidecar value is therefore checked
+-- against the file itself once per opened document (about 11 KB of reads) and
+-- corrected when they disagree.
 function ProgressSync:getDocumentDigest()
     if not self.ui or not self.ui.document then return nil end
-    local doc_settings = self.ui.doc_settings
-    local digest = doc_settings and doc_settings:readSetting("partial_md5_checksum") or nil
-    if digest then return digest end
-
     local file = self.ui.document.file
     if not file then return nil end
+
+    local verified = self.document_digest
+    if verified and verified.file == file then return verified.digest end
+
+    local doc_settings = self.ui.doc_settings
+    local stored = doc_settings and doc_settings:readSetting("partial_md5_checksum") or nil
+
     local ok, computed = pcall(util.partialMD5, file)
-    if not ok or not computed then return nil end
-    if doc_settings then
-        doc_settings:saveSetting("partial_md5_checksum", computed)
+    if not ok or not computed then
+        self.document_digest = { file = file, digest = stored }
+        return stored
     end
+
+    if computed ~= stored then
+        if stored then
+            logger.warn("BookOrbit: document identity corrected", file, stored, computed)
+            if self.onDocumentDigestCorrected then
+                pcall(self.onDocumentDigestCorrected, self, file, stored, computed)
+            end
+        end
+        if doc_settings then
+            doc_settings:saveSetting("partial_md5_checksum", computed)
+        end
+    end
+
+    self.document_digest = { file = file, digest = computed }
     return computed
 end
 

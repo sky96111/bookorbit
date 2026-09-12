@@ -114,7 +114,25 @@ function CatalogDownload.install(Catalog)
     end
 
     function Catalog:getCurrentDownloadDir()
-        return G_reader_settings:readSetting("download_dir") or G_reader_settings:readSetting("lastdir")
+        local shared = G_reader_settings:readSetting("download_dir")
+        if shared and shared ~= "" then return shared end
+
+        local settings = self.settings
+        if settings and settings.download_dir and settings.download_dir ~= "" then
+            return settings.download_dir
+        end
+
+        -- KOReader's own fallback is lastdir, which follows whatever the user
+        -- last browsed or opened. The server-provided relative path is
+        -- appended to this root, so letting it drift nests every download one
+        -- folder deeper and rewrites unrelated books at the same path. Freeze
+        -- the first value instead.
+        local fallback = G_reader_settings:readSetting("lastdir")
+        if fallback and fallback ~= "" and settings then
+            settings.download_dir = fallback
+            if self.save_settings then self.save_settings() end
+        end
+        return fallback
     end
 
     -- Single and bulk downloads share one destination, KOReader's own

@@ -213,6 +213,7 @@ do
         library_version = "v2",
         matches = { aaa = { bookId = 2, bookFileId = 22 } },
         state = state,
+        file_digests = { ["/books/a.epub"] = "aaa" },
         sidecar = {
             sidecarMtime = function() return 100 end,
             extract = function()
@@ -251,6 +252,51 @@ do
     harness.scheduler:drain()
     assertEqual(#harness.calls.page_stats, 1, "the acknowledged history is not uploaded again")
     assertEqual(#harness.calls.annotation_exchanges, 1, "the acknowledged sidecar is not exchanged again")
+end
+
+-- A path whose file no longer hashes to the digest the state bound to it must
+-- not feed that digest another book's sidecar. The sweep remaps the path to the
+-- digest the content actually has and skips the upload.
+do
+    local state = {
+        books = {
+            aaa = {
+                bookId = 1, fileId = 11, file = "/books/replaced.epub",
+                statsWatermark = 0, annWatermark = "", annCount = 0,
+                matchVerifiedAt = NOW, matchVerifiedVersion = "v1",
+            },
+        },
+        files = { ["/books/replaced.epub"] = "aaa" },
+        global = { libraryVersion = "v1" },
+    }
+    local harness = SweepHarness.install{
+        books = { { md5 = "aaa", id = 1, title = "A", last_open = 100 } },
+        events = {},
+        library_version = BASE.library_version,
+        state = state,
+        file_digests = { ["/books/replaced.epub"] = "ccc" },
+        sidecar = {
+            sidecarMtime = function() return 100 end,
+            extract = function()
+                return {
+                    annotations = { { datetime = "2025-01-01 10:00:00", text = "another book" } },
+                    annotations_count = 1,
+                    annotations_max_datetime = "2025-01-01 10:00:00",
+                    annotations_signature = "another-book-signature",
+                    bookmarks = {},
+                    bookmarks_signature = "empty-bookmarks",
+                }
+            end,
+        },
+    }
+    local Sweep = require("bookorbit_sweep")
+
+    startSweep(harness, Sweep)
+    harness.scheduler:drain()
+
+    assertEqual(#harness.calls.annotation_exchanges, 0, "a sidecar that belongs to another digest is never uploaded")
+    assertEqual(harness.state.files["/books/replaced.epub"], "ccc", "the path is remapped to the digest its content has")
+    assertEqual(harness.state.books.aaa.file, nil, "the digest that used to own the path lets go of it")
 end
 
 -- Cancellation stops the run at its next yield: the step already scheduled

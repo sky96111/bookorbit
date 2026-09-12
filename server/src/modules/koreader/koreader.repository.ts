@@ -78,6 +78,8 @@ export interface DeviceProgressUpsert {
   progress: string | null;
   chapterIndex: number | null;
   syncTimestamp: number | null;
+  /** Overrides the batch timestamp, so a stale entry can keep the row's existing recency. */
+  updatedAt?: Date;
 }
 
 const BATCH_QUERY_SIZE = 200;
@@ -554,7 +556,7 @@ export class KoreaderRepository {
             syncTimestamp: entry.syncTimestamp,
             orphaned: false,
             orphanedHash: null,
-            updatedAt,
+            updatedAt: entry.updatedAt ?? updatedAt,
           })),
         )
         .onConflictDoUpdate({
